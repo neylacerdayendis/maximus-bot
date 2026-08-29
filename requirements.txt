@@ -1,5 +1,4 @@
 flask
 flask-cors
 python-dotenv
-# iqoptionapi precisa ser instalada separadamente via git:
-# pip install -U git+https://github.com/iqoptionapi/iqoptionapi.git
+git+https://github.com/iqoptionapi/iqoptionapi.git
