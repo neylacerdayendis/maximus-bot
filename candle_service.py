@@ -295,6 +295,23 @@ def get_latest_candle():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/balance", methods=["GET"])
+def get_balance():
+    """Retorna o saldo disponivel da conta IQ Option atual (PRACTICE ou REAL).
+
+    Query params opcionais:
+      account_type - 'PRACTICE' ou 'REAL' (default: a conta ativa no momento)
+    """
+    account_type = request.args.get("account_type")
+    try:
+        client, active = switch_account(account_type)
+        balance = client.get_balance()
+        return jsonify({"account": active, "balance": balance})
+    except Exception as exc:
+        logger.exception("Erro ao consultar saldo")
+        return jsonify({"error": str(exc)}), 500
+
+
 if __name__ == "__main__":
     try:
         connect_iq()
