@@ -1,5 +1,4 @@
-"""
-CANDLE SERVICE - Maximus Bot
+"""CANDLE SERVICE - Maximus Bot
 -----------------------------
 Microservico em Python responsavel por:
   1) Conectar na IQ Option usando a biblioteca nao-oficial `iqoptionapi`
@@ -32,6 +31,13 @@ ENDPOINTS:
       -> (versao simples) retorna o candle mais recente (em formacao ou
          ultimo fechado) - o backend Node pode dar polling nesse endpoint
          a cada poucos segundos para simular tempo real
+
+NOTA SOBRE CONTAS (PRACTICE/REAL):
+  O endpoint POST /order/buy aceita o campo "account_type" no body
+  ("PRACTICE" ou "REAL"). Se enviado, o servico troca a conta da IQ Option
+  antes de comprar. Isso permite operar no demo OU no real a partir do painel.
+  Por seguranca, operacoes na conta REAL so sao permitidas se a variavel
+  ALLOW_REAL_TRADING=true estiver no .env.
 """
 
 import os
@@ -110,6 +116,31 @@ def ensure_connected():
     return iq_client
 
 
+def switch_account(account_type=None):
+    """Troca a conta da IQ Option para a desejada (PRACTICE ou REAL).
+
+    Recebe o account_type do request e, se for diferente do que esta em uso,
+    chama change_balance() para alternar entre demo e real. Retorna o cliente
+    ja na conta correta e o nome da conta ativa.
+    """
+    global iq_client, IQ_ACCOUNT_TYPE
+
+    target = (account_type or IQ_ACCOUNT_TYPE).upper()
+    if target not in ("PRACTICE", "REAL"):
+        target = IQ_ACCOUNT_TYPE.upper()
+
+    # A conexao precisa estar ativa de qualquer forma (a troca so ocorre
+    # quando necessario, para nao ficar chamando change_balance a toa)
+    client = ensure_connected()
+
+    if target != IQ_ACCOUNT_TYPE:
+        client.change_balance(target)
+        IQ_ACCOUNT_TYPE = target
+        logger.info("Conta IQ trocada para %s", target)
+
+    return client, target
+
+
 def format_candle(raw):
     """Converte o formato de candle da iqoptionapi para o formato usado
     pelo modulo combo1-comandos.js no backend Node.
@@ -169,13 +200,13 @@ def place_order():
         "pair": "EURUSD",
         "direction": "call" | "put",   # call = compra, put = venda
         "amount": 5,                    # valor da entrada em dinheiro
-        "expiration": 1                 # minutos de expiração (1, 5, 15...)
+        "expiration": 1,                # minutos de expiracao (1, 5, 15...)
+        "account_type": "PRACTICE"      # opcional: PRACTICE (demo) ou REAL
       }
 
-    IMPORTANTE: só executa se IQ_ACCOUNT_TYPE=PRACTICE (conta demo),
-    a menos que ALLOW_REAL_TRADING=true esteja explicitamente definido
-    no .env - trava de segurança para evitar operar com dinheiro real
-    sem confirmação explícita.
+    O campo "account_type" permite escolher a conta na hora da ordem. Se a
+    conta REAL for pedida, exige ALLOW_REAL_TRADING=true no .env (trava de
+    seguranca para evitar operar com dinheiro real sem confirmacao).
     """
     data = request.get_json(force=True) or {}
     pair = data.get("pair")
@@ -183,26 +214,31 @@ def place_order():
     amount = data.get("amount")
     expiration = data.get("expiration", 1)
 
+    # Conta escolhida no painel (PRACTICE ou REAL) - default: env
+    account_type = (data.get("account_type") or IQ_ACCOUNT_TYPE).upper()
+    if account_type not in ("PRACTICE", "REAL"):
+        return jsonify({"error": "account_type deve ser PRACTICE ou REAL"}), 400
+
     if not pair or direction not in ("call", "put") or not amount:
         return jsonify({"error": "campos obrigatorios: pair, direction (call/put), amount"}), 400
 
     allow_real = os.getenv("ALLOW_REAL_TRADING", "false").lower() == "true"
-    if IQ_ACCOUNT_TYPE == "REAL" and not allow_real:
+    if account_type == "REAL" and not allow_real:
         return jsonify({
             "error": (
-                "Bloqueado: conta REAL detectada e ALLOW_REAL_TRADING nao esta "
-                "habilitado no .env. Isso e uma trava de seguranca proposital."
+                "Bloqueado: a ordem pediu conta REAL e ALLOW_REAL_TRADING nao "
+                "esta habilitado no .env. Isso e uma trava de seguranca proposital."
             )
         }), 403
 
     try:
-        client = ensure_connected()
+        client = switch_account(account_type)
         check, order_id = client.buy(amount, pair, direction, expiration)
         if not check:
             return jsonify({"error": f"Falha ao abrir ordem: {order_id}"}), 500
 
-        logger.info("Ordem aberta: %s %s valor=%s exp=%smin id=%s", pair, direction, amount, expiration, order_id)
-        return jsonify({"order_id": order_id, "pair": pair, "direction": direction, "amount": amount})
+        logger.info("Ordem aberta: %s %s valor=%s exp=%smin id=%s conta=%s", pair, direction, amount, expiration, order_id, account_type)
+        return jsonify({"order_id": order_id, "pair": pair, "direction": direction, "amount": amount, "account_type": account_type})
     except Exception as exc:
         logger.exception("Erro ao abrir ordem")
         return jsonify({"error": str(exc)}), 500
@@ -211,7 +247,7 @@ def place_order():
 @app.route("/order/result", methods=["GET"])
 def get_order_result():
     """
-    Consulta o resultado de uma ordem já expirada.
+    Consulta o resultado de uma ordem ja expirada.
     Query params: order_id (obrigatorio)
 
     Retorna: { status: "pending" | "win" | "loss" | "draw", profit: number }
